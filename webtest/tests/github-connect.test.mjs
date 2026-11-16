@@ -121,6 +121,76 @@ test('GitHub repository picker loads pages, filters names, and fills the actual 
   assert.equal(host.querySelector('[data-github-more]'), null);
 });
 
+test('GitHub repository picker keeps loaded pages and retries the same page after a 503', async (t) => {
+  const app = await loadApp();
+  t.after(app.close);
+  app.router.get('/api/auth/github/repositories?page=1', { repositories: [
+    { full_name: 'team/private', html_url: 'https://github.com/team/private', default_branch: 'develop', private: true },
+    { full_name: 'me/first', html_url: 'https://github.com/me/first', default_branch: 'main', private: false },
+  ], hasMore: true });
+  let pageTwoCalls = 0;
+  app.router.get('/api/auth/github/repositories?page=2', () => {
+    pageTwoCalls += 1;
+    if (pageTwoCalls === 1) return { status: 503, body: { error: 'service unavailable' } };
+    return { repositories: [
+      { full_name: 'me/public', html_url: 'https://github.com/me/public', default_branch: 'trunk', private: false },
+      { full_name: 'me/second', html_url: 'https://github.com/me/second', default_branch: 'main', private: false },
+    ], hasMore: false };
+  });
+  app.evaluate(`
+    state.currentUser={id:1,loginName:'owner'};
+    const host=document.createElement('div');host.id='github-picker-retry-test';document.body.append(host);
+    state.data.users=[{id:1,gitTokenConfigured:true}];
+    mountGitHubRepoPicker(host,repository=>{window.githubSelected=repository});
+  `);
+  const host = app.document.querySelector('#github-picker-retry-test');
+  host.querySelector('[data-github-load]').click();
+  await settle(5);
+  assert.match(host.textContent, /team\/private · 私有/);
+
+  const search = host.querySelector('[data-github-search]');
+  search.value = '/';
+  search.dispatchEvent(new app.window.Event('input'));
+  const select = host.querySelector('[data-github-repo]');
+  const option = [...select.options].find((item) => item.value === 'team/private');
+  assert.ok(option);
+  option.selected = true;
+  select.dispatchEvent(new app.window.Event('change'));
+  assert.equal(app.window.githubSelected.full_name, 'team/private');
+
+  host.querySelector('[data-github-more]').click();
+  await settle(6);
+  assert.equal(pageTwoCalls, 1);
+  assert.equal([...host.querySelectorAll('[data-github-repo] option')].filter((item) => item.value === 'team/private').length, 1);
+  assert.match(host.textContent, /team\/private · 私有/);
+  assert.equal(host.querySelector('[data-github-search]').value, '/');
+  assert.equal(host.querySelector('[data-github-repo]').value, 'team/private');
+  assert.equal(app.window.githubSelected.full_name, 'team/private');
+  assert.ok(host.querySelector('[data-github-more]'));
+  const error = host.querySelector('[data-github-page-error]');
+  assert.ok(error);
+  assert.equal(error.hidden, false);
+  assert.match(error.textContent, /加载更多仓库失败/);
+  const retry = error.querySelector('[data-github-retry]');
+  assert.ok(retry);
+
+  retry.click();
+  await settle(6);
+  const pageCalls = app.router.calls.filter((call) => call.path === '/api/auth/github/repositories');
+  assert.equal(pageCalls.filter((call) => call.search === '?page=1').length, 1);
+  assert.equal(pageCalls.filter((call) => call.search === '?page=2').length, 2);
+  assert.equal(pageTwoCalls, 2);
+  assert.equal(host.querySelector('[data-github-page-error]'), null);
+  const values = [...host.querySelectorAll('[data-github-repo] option')].map((item) => item.value);
+  assert.equal(values.filter((value) => value === 'team/private').length, 1);
+  assert.equal(values.filter((value) => value === 'me/first').length, 1);
+  assert.equal(values.filter((value) => value === 'me/public').length, 1);
+  assert.equal(values.filter((value) => value === 'me/second').length, 1);
+  assert.equal(host.querySelector('[data-github-search]').value, '/');
+  assert.equal(host.querySelector('[data-github-repo]').value, 'team/private');
+  assert.equal(app.window.githubSelected.full_name, 'team/private');
+});
+
 test('GitHub setup keeps deployment configuration out of personal authorization', async (t) => {
   const app = await loadApp();
   t.after(app.close);
