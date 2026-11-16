@@ -100,33 +100,50 @@ function mountGitHubRepoPicker(host,onSelect){
   host.innerHTML=(connected?'':githubConnectHTML())+`<button type="button" class="button ghost small" data-github-load${connected?'':' hidden'}>选择我的 GitHub 仓库</button><p data-github-repo-hint${connected?' hidden':''}>连接后可选择自己的仓库；公开仓库也可直接填写地址。访问令牌可在个人配置中设置。</p><div data-github-repo-list></div>`;
   hydrateGitHubConnections(host);
   const load=host.querySelector('[data-github-load]'),list=host.querySelector('[data-github-repo-list]');
-  let repositories=[],page=1,busy=false;
-  const paint=hasMore=>{
-    list.innerHTML='<label class="pa-field"><span>搜索已加载的仓库</span><input class="pa-input" type="search" data-github-search placeholder="仓库名 / 组织名"></label><label class="pa-field"><span>选择仓库</span><select class="pa-input" data-github-repo aria-label="我的 GitHub 仓库"><option value="">请选择仓库</option></select></label><p data-github-repo-empty hidden>未找到仓库，可手动填写地址；组织仓库可能需要管理员批准授权。</p>'+(hasMore?'<button type="button" class="button ghost small" data-github-more>加载更多仓库</button>':'');
-    const select=list.querySelector('[data-github-repo]'),search=list.querySelector('[data-github-search]'),empty=list.querySelector('[data-github-repo-empty]');
+  let repositories=[],page=1,busy=false,hasMore=false,failedPage=0,errorText='';
+  const render=()=>{
+    const previousSearch=list.querySelector('[data-github-search]')?.value||'';
+    const previousSelected=list.querySelector('[data-github-repo]')?.value||'';
+    list.innerHTML='<label class="pa-field"><span>搜索已加载的仓库</span><input class="pa-input" type="search" data-github-search placeholder="仓库名 / 组织名"></label><label class="pa-field"><span>选择仓库</span><select class="pa-input" data-github-repo aria-label="我的 GitHub 仓库"><option value="">请选择仓库</option></select></label><p data-github-repo-empty hidden>未找到仓库，可手动填写地址；组织仓库可能需要管理员批准授权。</p><p class="credential-vline is-err" role="alert" data-github-repo-error hidden></p>'+(failedPage?'<button type="button" class="button ghost small" data-github-retry>重试加载第 '+failedPage+' 页</button>':hasMore?'<button type="button" class="button ghost small" data-github-more>加载更多仓库</button>':'');
+    const select=list.querySelector('[data-github-repo]'),search=list.querySelector('[data-github-search]'),empty=list.querySelector('[data-github-repo-empty]'),error=list.querySelector('[data-github-repo-error]');
     const filter=()=>{
       select.replaceChildren(new Option('请选择仓库',''));
       const visible=repositories.filter(repo=>repo.full_name.toLowerCase().includes(search.value.toLowerCase()));
       for(const repository of visible){const option=document.createElement('option');option.value=repository.full_name;option.textContent=repository.full_name+(repository.private?' · 私有':'');select.append(option)}
       empty.hidden=visible.length>0;
+      if(previousSelected&&visible.some(repo=>repo.full_name===previousSelected))select.value=previousSelected;
     };
+    search.value=previousSearch;
     search.oninput=filter;
     select.onchange=()=>{const repository=repositories.find(repo=>repo.full_name===select.value);if(repository)onSelect(repository)};
     const more=list.querySelector('[data-github-more]');if(more)more.onclick=()=>fetchPage(page+1);
+    const retry=list.querySelector('[data-github-retry]');if(retry)retry.onclick=()=>fetchPage(failedPage);
+    if(failedPage){error.hidden=false;error.textContent=errorText}
     filter();
   };
   const fetchPage=async requested=>{
     if(busy)return;
     busy=true;load.disabled=true;
     const actor=Number(state.currentUser?.id);
-    const more=list.querySelector('[data-github-more]');if(more)more.disabled=true;
+    const action=list.querySelector('[data-github-more],[data-github-retry]');if(action)action.disabled=true;
     try{
       const result=await api('/api/auth/github/repositories?page='+requested);
       if(!host.isConnected||Number(state.currentUser?.id)!==actor)return;
-      page=requested;repositories=requested===1?result.repositories:repositories.concat(result.repositories);
-      paint(result.hasMore);
-    }catch(error){list.textContent=error.message}
-    finally{busy=false;load.disabled=false;if(more)more.disabled=false}
+      page=requested;failedPage=0;errorText='';hasMore=!!result.hasMore;
+      const incoming=Array.isArray(result.repositories)?result.repositories:[];
+      const seen=new Set();
+      repositories=(requested===1?incoming:repositories.concat(incoming)).filter(repository=>{
+        const key=repository.full_name||repository.id;
+        if(!key)return true;
+        if(seen.has(key))return false;
+        seen.add(key);return true;
+      });
+      render();
+    }catch(error){
+      if(!host.isConnected||Number(state.currentUser?.id)!==actor)return;
+      failedPage=requested;errorText=error.message||'仓库加载失败';render();
+    }
+    finally{busy=false;load.disabled=false;const action=list.querySelector('[data-github-more],[data-github-retry]');if(action)action.disabled=false}
   };
   load.onclick=()=>fetchPage(1);
   host.addEventListener('github-connected',()=>{
