@@ -121,6 +121,65 @@ test('GitHub repository picker loads pages, filters names, and fills the actual 
   assert.equal(host.querySelector('[data-github-more]'), null);
 });
 
+test('GitHub repository picker keeps the loaded list and retries the same page after a 503', async (t) => {
+  const app = await loadApp();
+  t.after(app.close);
+  let pageTwoCalls = 0;
+  app.router.get('/api/auth/github/repositories?page=1', { repositories: [{ full_name: 'team/private', html_url: 'https://github.com/team/private', default_branch: 'develop', private: true }], hasMore: true });
+  app.router.get('/api/auth/github/repositories?page=2', () => {
+    pageTwoCalls += 1;
+    if (pageTwoCalls === 1) return { status: 503, body: { error: 'service unavailable' } };
+    return { repositories: [{ full_name: 'me/public', html_url: 'https://github.com/me/public', default_branch: 'trunk', private: false }], hasMore: false };
+  });
+  app.evaluate(`
+    state.currentUser={id:1,loginName:'owner'};
+    const host=document.createElement('div');host.id='github-pagination-test';document.body.append(host);
+    state.data.users=[{id:1,gitTokenConfigured:true}];
+    mountGitHubRepoPicker(host,repository=>{window.githubSelected=repository});
+  `);
+  const host = app.document.querySelector('#github-pagination-test');
+  host.querySelector('[data-github-load]').click();
+  await settle(5);
+  const search = host.querySelector('[data-github-search]');
+  search.value = 'team/';
+  search.dispatchEvent(new app.window.Event('input'));
+  const select = host.querySelector('[data-github-repo]');
+  select.options[1].selected = true;
+  select.dispatchEvent(new app.window.Event('change'));
+  assert.equal(app.window.githubSelected.full_name, 'team/private');
+  host.querySelector('[data-github-more]').click();
+  await settle(5);
+  assert.equal(pageTwoCalls, 1);
+  assert.match(host.textContent, /team\/private/);
+  assert.equal(host.querySelector('[data-github-search]').value, 'team/');
+  assert.equal(host.querySelector('[data-github-repo]').value, 'team/private');
+  const error = host.querySelector('[data-github-error]');
+  assert.ok(error);
+  assert.equal(error.hidden, false);
+  assert.match(error.textContent, /service unavailable/);
+  const retry = host.querySelector('[data-github-retry]');
+  assert.ok(retry);
+  assert.match(retry.textContent, /第 2 页/);
+  retry.click();
+  await settle(5);
+  assert.equal(pageTwoCalls, 2);
+  const pageTwoRequests = app.router.calls.filter((call) => call.path === '/api/auth/github/repositories' && call.search === '?page=2');
+  assert.equal(pageTwoRequests.length, 2);
+  assert.equal(app.router.calls.filter((call) => call.path === '/api/auth/github/repositories' && call.search === '?page=1').length, 1);
+  assert.equal(host.querySelector('[data-github-error]'), null);
+  assert.equal(host.querySelector('[data-github-search]').value, 'team/');
+  assert.equal(host.querySelector('[data-github-repo]').value, 'team/private');
+  const finalSearch = host.querySelector('[data-github-search]');
+  finalSearch.value = '';
+  finalSearch.dispatchEvent(new app.window.Event('input'));
+  const finalSelect = host.querySelector('[data-github-repo]');
+  assert.equal(finalSelect.options.length, 3);
+  const names = [...finalSelect.options].slice(1).map((option) => option.value);
+  assert.deepEqual(names, ['team/private', 'me/public']);
+  assert.equal(new Set(names).size, 2);
+  assert.equal(host.querySelector('[data-github-more]'), null);
+});
+
 test('GitHub setup keeps deployment configuration out of personal authorization', async (t) => {
   const app = await loadApp();
   t.after(app.close);
